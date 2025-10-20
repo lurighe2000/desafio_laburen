@@ -6,14 +6,36 @@ const TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_ID = process.env.WHATSAPP_PHONE_ID;
 const API_BASE = `https://graph.facebook.com/v15.0/${PHONE_ID}`;
 
+// Normalize phone numbers for this demo: some callbacks may include `549...` while
+// our expected format (for tests) is `541...`. This helper will strip non-digits
+// (and a leading +) and convert a leading 549 -> 541. It returns the numeric string.
+function normalizePhoneNumber(raw) {
+  if (!raw && raw !== 0) return raw;
+  try {
+    let s = String(raw).trim();
+    // remove spaces, parentheses, dashes
+    s = s.replace(/[^\d+]/g, '');
+    if (s.startsWith('+')) s = s.slice(1);
+    if (s.startsWith('549')) {
+      const converted = '541' + s.slice(3);
+      console.log('normalizePhoneNumber: converted', s, '->', converted);
+      return converted;
+    }
+    return s;
+  } catch (e) {
+    return raw;
+  }
+}
+
 async function sendText(to, text) {
   if (!TOKEN || !PHONE_ID) throw new Error('WHATSAPP_TOKEN or WHATSAPP_PHONE_ID not set');
+  const normalizedTo = normalizePhoneNumber(to) || to;
   const url = `${API_BASE}/messages`;
-  const payload = { messaging_product: 'whatsapp', to, type: 'text', text: { body: text } };
+  const payload = { messaging_product: 'whatsapp', to: normalizedTo, type: 'text', text: { body: text } };
   try {
     // Log request summary (mask token) for debugging
     const tokenPreview = TOKEN && TOKEN.length > 8 ? TOKEN.slice(0, 8) + '...' : '<no-token>';
-    console.log('whatsapp send ->', url, 'to=', to, 'phoneId=', PHONE_ID, 'tokenPrefix=', tokenPreview, 'bodyPreview=', JSON.stringify(payload).slice(0, 200));
+    console.log('whatsapp send ->', url, 'to=', normalizedTo, 'origTo=', to, 'phoneId=', PHONE_ID, 'tokenPrefix=', tokenPreview, 'bodyPreview=', JSON.stringify(payload).slice(0, 200));
   } catch (e) {
     /* ignore logging errors */
   }

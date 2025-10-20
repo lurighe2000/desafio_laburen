@@ -14,10 +14,11 @@ const PORT = process.env.PORT || 3000;
 app.get('/products', async (req, res) => {
   try {
     const q = req.query.q || '';
+    const externalIdQuery = req.query.externalId || req.query.externalid || null;
     const limit = parseInt(req.query.limit || '20', 10);
     const offset = parseInt(req.query.offset || '0', 10);
 
-    const where = q
+    let where = q
       ? {
           OR: [
             { name: { contains: q, mode: 'insensitive' } },
@@ -26,8 +27,31 @@ app.get('/products', async (req, res) => {
         }
       : {};
 
+    // allow direct lookup by externalId
+    if (externalIdQuery) {
+      where = { externalId: externalIdQuery };
+    }
+
     const products = await prisma.product.findMany({ where, take: limit, skip: offset });
     res.json({ products });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'internal server error' });
+  }
+});
+
+// GET /products/external/:externalId - lookup by externalId (legacy Excel ID)
+app.get('/products/external/:externalId', async (req, res) => {
+  try {
+    const externalId = req.params.externalId;
+    let product = await prisma.product.findFirst({ where: { externalId } });
+    if (!product) {
+      // fallback: some rows kept ID only in description; try to match 'ID: 008' in description
+      const needle = `ID: ${externalId}`;
+      product = await prisma.product.findFirst({ where: { description: { contains: needle, mode: 'insensitive' } } });
+    }
+    if (!product) return res.status(404).json({ error: 'product not found' });
+    res.json(product);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'internal server error' });
@@ -208,6 +232,27 @@ app.get('/health', async (req, res) => {
 });
 
 const { sendText } = require('./whatsapp/meta');
+const { orchestrate } = require('./agent/orchestrator');
+// pending actions waiting for user confirmation: map from normalizedFrom -> { actionObj }
+const pendingActions = new Map();
+
+// phone normalization helper (kept in server too for incoming messages)
+function normalizePhoneNumber(raw) {
+  if (!raw && raw !== 0) return raw;
+  try {
+    let s = String(raw).trim();
+    s = s.replace(/[^\d+]/g, '');
+    if (s.startsWith('+')) s = s.slice(1);
+    if (s.startsWith('549')) {
+      const converted = '541' + s.slice(3);
+      console.log('normalizePhoneNumber (incoming): converted', s, '->', converted);
+      return converted;
+    }
+    return s;
+  } catch (e) {
+    return raw;
+  }
+}
 
 app.post('/webhook/messages', async (req, res) => {
   try {
@@ -222,48 +267,53 @@ app.post('/webhook/messages', async (req, res) => {
 
     // helper to handle a single message object { from, text }
     async function handleMessage(m) {
-      const from = m.from;
+      const rawFrom = m.from;
+      const from = normalizePhoneNumber(rawFrom) || rawFrom;
       const text = (m.text && m.text.body) || (typeof m === 'string' ? m : undefined);
-      if (text && text.toLowerCase().includes('comprar')) {
-        // create a cart and reply with cart id using the first available product
-        const result = await prisma.$transaction(async (tx) => {
-          const cart = await tx.cart.create({ data: {} });
-          // choose first available product instead of hardcoded id
-          const p = await tx.product.findFirst({ orderBy: { id: 'asc' } });
-          if (!p) throw new Error('no products available');
-          await tx.cartItem.create({ data: { cartId: cart.id, productId: p.id, qty: 1, unitPrice: p.price } });
-          return { cart_id: cart.id };
-        });
-        // send a reply via Meta and log the provider response for debugging
+      if (!text) return null;
+
+      // If user has a pending action and confirms, execute it
+      const lower = text && text.toLowerCase && text.toLowerCase().trim();
+      if (pendingActions.has(from) && (lower === 'si' || lower === 'sí' || lower === 'confirmar' || lower === 'yes')) {
+        const actionObj = pendingActions.get(from);
+        pendingActions.delete(from);
         try {
-          const sendRes = await sendText(from, `Gracias! Creé un carrito con id ${result.cart_id}.`);
-          try {
-            const bodyPreview = sendRes && sendRes.body ? JSON.stringify(sendRes.body).slice(0, 1000) : '<no-body>';
-            console.log('sendText result', sendRes.status, bodyPreview);
-          } catch (e) {
-            console.log('sendText result', sendRes && sendRes.status);
-          }
+          const execRes = await require('./agent/orchestrator').executeAction(actionObj);
+          await sendText(from, execRes.text);
+          return res.json({ status: 'ok', acted: 'confirmed', result: execRes });
         } catch (e) {
-          console.warn('failed to send reply', e);
+          console.error('error executing confirmed action', e);
+          await sendText(from, 'Hubo un error ejecutando la acción confirmada.');
+          return res.status(500).json({ error: 'execution_error' });
         }
-        return res.json({ status: 'ok', acted: 'created_cart', result });
       }
-      // If we received any other text, send a helpful default reply so user isn't left without an answer
+
+      // Let the orchestrator propose an action but don't execute dangerous ops without confirmation
       try {
-        if (text) {
-          const sendRes = await sendText(from, 'Hola! 👋 Puedo ayudarte a comprar. Escribe "Quiero comprar" para que cree un carrito con un producto de ejemplo, o escribe "listado" para ver productos.');
-          try {
-            const bodyPreview = sendRes && sendRes.body ? JSON.stringify(sendRes.body).slice(0, 1000) : '<no-body>';
-            console.log('sendText (fallback) result', sendRes.status, bodyPreview);
-          } catch (e) {
-            console.log('sendText (fallback) result', sendRes && sendRes.status);
-          }
-          return res.json({ status: 'ok', acted: 'replied_help' });
+        const plan = await require('./agent/orchestrator').plan(text);
+        const act = plan.action || plan.intent;
+        // require confirmation for create_cart or update_cart
+        if (act === 'create_cart' || act === 'update_cart') {
+          // store plan under normalized from
+          pendingActions.set(from, plan);
+          await sendText(from, 'Voy a ejecutar una acción que modifica tu carrito. ¿Confirmás? Responder "sí" para confirmar.');
+          return res.json({ status: 'ok', acted: 'asked_confirmation', plan });
         }
-      } catch (e) {
-        console.warn('failed to send fallback reply', e);
+
+        // otherwise execute immediately
+        const aiExec = await require('./agent/orchestrator').executeAction(plan);
+        const reply = aiExec && aiExec.text ? aiExec.text : 'Lo siento, no pude procesar tu solicitud.';
+        await sendText(from, reply);
+        return res.json({ status: 'ok', acted: 'orchestrated', result: aiExec });
+      } catch (err) {
+        console.error('orchestrator error', err);
+        try {
+          await sendText(from, 'Hubo un error procesando tu pedido. Intentá de nuevo más tarde.');
+        } catch (e) {
+          /* ignore */
+        }
+        return res.status(500).json({ error: 'orchestrator_error' });
       }
-      return null;
     }
 
     if (Array.isArray(messages) && messages.length > 0) {
