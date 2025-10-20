@@ -1,3 +1,104 @@
+# Laburen - Agente IA (Backend)
+
+Este repositorio contiene una implementación mínima, ejecutable y documentada, que demuestra cómo un agente de IA puede vender productos mediante una API propia y una base de datos PostgreSQL.
+
+El contenido y los pasos están alineados con el enunciado del desafío (archivo adjunto `Desafio Tecnico AI Engineer - Laburen.com.txt`).
+
+Resumen rápido
+- API REST (Express + Prisma) con los endpoints requeridos: `GET /products`, `GET /products/:id`, `POST /carts`, `PATCH /carts/:id`.
+- Base de datos PostgreSQL (Prisma ORM). Los productos se importan desde `products.xlsx`.
+- Seed que exige `products.xlsx` (no hay fallback con datos embebidos).
+- Integración demo para un agente LLM (scripts) y webhook demo para WhatsApp (Meta).
+
+Contenido del repositorio
+- `src/` - servidor Express y adaptadores (webhook, whatsapp helper, llm adapter).
+- `prisma/` - esquema Prisma (`schema.prisma`).
+- `scripts/` - demos y tests (smoke, agent_demo, llm_conversation, webhook_demo).
+- `products.xlsx` - archivo fuente de productos (debe estar en la raíz para el seed).
+- `docs/` - diagramas y especificación del API.
+
+Requisitos
+- Node.js >= 18
+- PostgreSQL (local o en Docker)
+- Opcional: ngrok para exponer el webhook en desarrollo
+
+Variables de entorno
+Copiar `.env.example` a `.env` y completar los valores sensibles:
+
+    cp .env.example .env
+    # editar .env con el editor de su preferencia
+
+Las variables importantes:
+- `DATABASE_URL` - URL de conexión PostgreSQL
+- `WHATSAPP_TOKEN`, `WHATSAPP_PHONE_ID`, `WHATSAPP_VERIFY_TOKEN` - para integrar WhatsApp (opcional)
+- `LLM_API_KEY` - clave para el proveedor LLM (opcional; si no se provee, se usa un demo simulado)
+
+Instalación y arranque (Windows PowerShell)
+
+1) Instalar dependencias
+
+    npm install
+
+2) Generar cliente Prisma y aplicar migraciones
+
+    npx prisma generate
+    npx prisma migrate deploy
+
+3) Preparar `products.xlsx`
+
+- Coloque el archivo `products.xlsx` en la raíz del repositorio. Cada fila debe representar un producto y contener al menos: `name`, `description`, `price`, `stock`.
+- El script de seed requiere explícitamente `products.xlsx` y abortará si no está presente — esto fuerza que la fuente de productos sea única y reproducible.
+
+4) Ejecutar seed para poblar la base de datos
+
+    npm run seed
+    # Debe ver: "Seed finished. Total products: <N>"
+
+5) Iniciar servidor
+
+    npm start
+    # o
+    node src/server.js
+
+6) Ejecutar pruebas y demos
+
+    # Smoke tests (ejecuta GET/POST/PATCH básicos)
+    node scripts/smoke.js
+
+    # Demo del agente (simula un flujo: listar, obtener, crear carrito, actualizar)
+    node scripts/agent_demo.js
+
+    # Demo LLM (si no hay clave, corre un demo simulado)
+    node scripts/llm_conversation.js
+
+    # Demo de webhook (envía un payload simplificado al endpoint /webhook/messages)
+    node scripts/webhook_demo.js
+
+Cómo funciona la relación entre `products.xlsx` y la DB
+- `products.xlsx` es la fuente de verdad. El seed importa sus filas a la tabla `Product` en PostgreSQL.
+- En tiempo de ejecución la API no lee `products.xlsx` directamente: el servidor usa Prisma para consultar la base de datos. Por eso es obligatorio ejecutar el seed antes de usar la API.
+
+Notas sobre el webhook y WhatsApp
+- El endpoint `POST /webhook/messages` acepta payloads en el formato que usa Meta (WhatsApp Cloud) y, para facilitar pruebas locales, también acepta un payload simplificado `{ from, text }`.
+- Si el mensaje contiene la palabra "comprar" el webhook crea un carrito y añade el primer producto disponible (esto evita asumir un id fijo). En producción se debe mejorar la resolución por nombre/codigo y la confirmación al usuario.
+
+Recomendaciones y próximos pasos
+- Si no quieres que el seed borre carritos en cada ejecución, puedo convertir el seed para que haga upsert (idempotente). ¿Lo quieres así?
+- Puedo reemplazar este README por una versión aún más breve o dividirlo en secciones si preferís (por ejemplo: DEV.md y PROD.md).
+- Para crear el Pull Request y mergearlo a `main` necesito un PAT con scope `repo` — si prefieres puedo dejar la rama lista y vos creás el PR desde GitHub.
+
+Documentación adicional
+- Lee `docs/API_SPEC.md` y `docs/DIAGRAMS.md` para el diagrama de flujo y ejemplos de payloads (son parte de la entrega técnica).
+
+Anexo: enunciado del desafío
+- El archivo `Desafio Tecnico AI Engineer - Laburen.com.txt` está incluido en el repositorio (o en los attachments) y describe los requisitos de la prueba técnica.
+
+----
+
+Si querés, ahora:
+- hago el seed idempotente (upsert) y lo commiteo, o
+- actualizo los `docs/*.md` para eliminar ejemplos hardcodeados y dejar placeholders, o
+- creo la PR hacia `main` si me das un token con permisos `repo`.
 # Laburen AI Agent - Backend (Express + Prisma)
 
 This repository contains a minimal implementation of the API required by the challenge: products and carts with PostgreSQL (Prisma ORM). It also includes seed scripts to load `products.xlsx` if present.
