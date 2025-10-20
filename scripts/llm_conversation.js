@@ -22,21 +22,22 @@ async function runDemo() {
     const p = await api('/products');
     console.log(p);
 
-    // Step 2 - show product details
-    console.log('\n[SIM] 2) Get product 1');
-    const pd = await api('/products/1');
-    console.log(pd);
+  // Step 2 - pick first product for demo operations
+  console.log('\n[SIM] 2) Pick first product');
+  const firstId = Array.isArray(p.body?.products) && p.body.products.length > 0 ? p.body.products[0].id : 1;
+  const pd = await api(`/products/${firstId}`);
+  console.log(pd);
 
-    // Step 3 - simulate a decision flow: create cart with product 1 x2
-    console.log('\n[SIM] 3) Create cart with product 1 x2 (simulated decision)');
-    const createRes = await api('/carts', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ items:[{ product_id:1, qty:2 }] }) });
-    console.log(createRes);
+  // Step 3 - simulate a decision flow: create cart with the first product x2
+  console.log(`\n[SIM] 3) Create cart with product ${firstId} x2 (simulated decision)`);
+  const createRes = await api('/carts', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ items:[{ product_id:firstId, qty:2 }] }) });
+  console.log(createRes);
 
-    // Step 4 - simulate updating cart to qty 1
-    console.log('\n[SIM] 4) Update cart (set qty to 1)');
-    const cartId = createRes?.body?.cart_id || 1;
-    const updRes = await api(`/carts/${cartId}`, { method: 'PATCH', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ items:[{ product_id:1, qty:1 }] }) });
-    console.log(updRes);
+  // Step 4 - simulate updating cart to qty 1
+  console.log('\n[SIM] 4) Update cart (set qty to 1)');
+  const cartId = createRes?.body?.cart_id || 1;
+  const updRes = await api(`/carts/${cartId}`, { method: 'PATCH', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ items:[{ product_id:firstId, qty:1 }] }) });
+  console.log(updRes);
 
     // Summary
     console.log('\n[SIM] Demo finished. Summary:');

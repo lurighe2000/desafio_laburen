@@ -6,6 +6,8 @@ const prisma = new PrismaClient();
 const app = express();
 app.use(express.json());
 
+const fetch = require('node-fetch');
+
 const PORT = process.env.PORT || 3000;
 
 // GET /products?q=&limit=&offset=
@@ -164,6 +166,47 @@ app.get('/webhook/messages', (req, res) => {
   res.status(400).send('no verification query');
 });
 
+// Lightweight healthcheck
+app.get('/health', async (req, res) => {
+  const result = { ok: true, checks: {} };
+  // check DB
+  try {
+    const count = await prisma.product.count();
+    result.checks.database = { ok: true, product_count: count };
+  } catch (err) {
+    result.ok = false;
+    result.checks.database = { ok: false, error: String(err && err.message ? err.message : err) };
+  }
+
+  // check WhatsApp integration lightly: presence of token and phone id and ability to call /me
+  const token = process.env.WHATSAPP_TOKEN;
+  const phoneId = process.env.WHATSAPP_PHONE_ID;
+  if (!token) {
+    result.ok = false;
+    result.checks.whatsapp = { ok: false, reason: 'no_token' };
+  } else if (!phoneId) {
+    result.ok = false;
+    result.checks.whatsapp = { ok: false, reason: 'no_phone_id' };
+  } else {
+    try {
+      const headers = { Authorization: `Bearer ${token}` };
+      const meRes = await fetch('https://graph.facebook.com/v24.0/me', { headers });
+      const meJson = await meRes.json().catch(() => null);
+      if (!meRes.ok) {
+        result.ok = false;
+        result.checks.whatsapp = { ok: false, status: meRes.status, body: meJson };
+      } else {
+        result.checks.whatsapp = { ok: true, me: meJson };
+      }
+    } catch (err) {
+      result.ok = false;
+      result.checks.whatsapp = { ok: false, error: String(err && err.message ? err.message : err) };
+    }
+  }
+
+  res.status(result.ok ? 200 : 503).json(result);
+});
+
 const { sendText } = require('./whatsapp/meta');
 
 app.post('/webhook/messages', async (req, res) => {
@@ -171,27 +214,68 @@ app.post('/webhook/messages', async (req, res) => {
     // Meta sends structured notifications; for demo, handle simplified payloads
     console.log('incoming webhook body', JSON.stringify(req.body).slice(0, 1000));
     // Try to find message text and sender
+    // Try Meta structured payload first
     const entry = req.body.entry && req.body.entry[0];
     const changes = entry && entry.changes && entry.changes[0];
     const value = changes && changes.value;
     const messages = value && value.messages;
-    if (Array.isArray(messages) && messages.length > 0) {
-      const m = messages[0];
+
+    // helper to handle a single message object { from, text }
+    async function handleMessage(m) {
       const from = m.from;
-      const text = m.text && m.text.body;
+      const text = (m.text && m.text.body) || (typeof m === 'string' ? m : undefined);
       if (text && text.toLowerCase().includes('comprar')) {
-        // create a cart and reply with cart id
+        // create a cart and reply with cart id using the first available product
         const result = await prisma.$transaction(async (tx) => {
           const cart = await tx.cart.create({ data: {} });
-          const p = await tx.product.findUnique({ where: { id: 1 } });
-          if (!p) throw new Error('no product 1');
+          // choose first available product instead of hardcoded id
+          const p = await tx.product.findFirst({ orderBy: { id: 'asc' } });
+          if (!p) throw new Error('no products available');
           await tx.cartItem.create({ data: { cartId: cart.id, productId: p.id, qty: 1, unitPrice: p.price } });
           return { cart_id: cart.id };
         });
-        // send a reply via Meta
-        await sendText(from, `Gracias! Creé un carrito con id ${result.cart_id}.`);
+        // send a reply via Meta and log the provider response for debugging
+        try {
+          const sendRes = await sendText(from, `Gracias! Creé un carrito con id ${result.cart_id}.`);
+          try {
+            const bodyPreview = sendRes && sendRes.body ? JSON.stringify(sendRes.body).slice(0, 1000) : '<no-body>';
+            console.log('sendText result', sendRes.status, bodyPreview);
+          } catch (e) {
+            console.log('sendText result', sendRes && sendRes.status);
+          }
+        } catch (e) {
+          console.warn('failed to send reply', e);
+        }
         return res.json({ status: 'ok', acted: 'created_cart', result });
       }
+      // If we received any other text, send a helpful default reply so user isn't left without an answer
+      try {
+        if (text) {
+          const sendRes = await sendText(from, 'Hola! 👋 Puedo ayudarte a comprar. Escribe "Quiero comprar" para que cree un carrito con un producto de ejemplo, o escribe "listado" para ver productos.');
+          try {
+            const bodyPreview = sendRes && sendRes.body ? JSON.stringify(sendRes.body).slice(0, 1000) : '<no-body>';
+            console.log('sendText (fallback) result', sendRes.status, bodyPreview);
+          } catch (e) {
+            console.log('sendText (fallback) result', sendRes && sendRes.status);
+          }
+          return res.json({ status: 'ok', acted: 'replied_help' });
+        }
+      } catch (e) {
+        console.warn('failed to send fallback reply', e);
+      }
+      return null;
+    }
+
+    if (Array.isArray(messages) && messages.length > 0) {
+      const r = await handleMessage(messages[0]);
+      if (r) return r;
+    }
+
+    // If no Meta-style messages, accept a simplified payload for local demos: { from, text }
+    if (req.body && (req.body.from || req.body.text)) {
+      const simple = { from: req.body.from || 'demo', text: { body: req.body.text || '' } };
+      const r = await handleMessage(simple);
+      if (r) return r;
     }
     res.json({ status: 'ok', acted: 'none' });
   } catch (err) {
@@ -202,4 +286,19 @@ app.post('/webhook/messages', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Server listening on port ${PORT}`);
+});
+
+// Health endpoint: basic readiness check
+app.get('/health', async (req, res) => {
+  // lightweight check: ensure Prisma can connect and required env vars exist
+  try {
+    const dbOk = await prisma.$queryRaw`SELECT 1`;
+    const token = process.env.WHATSAPP_TOKEN;
+    const phoneId = process.env.WHATSAPP_PHONE_ID;
+    const ok = !!(dbOk && token && phoneId);
+    res.json({ status: ok ? 'ok' : 'failed', db: !!dbOk, whatsapp_token: !!token, whatsapp_phone_id: !!phoneId });
+  } catch (err) {
+    console.error('health check error', err && err.message ? err.message : err);
+    res.status(500).json({ status: 'failed', error: String(err) });
+  }
 });

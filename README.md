@@ -223,3 +223,40 @@ Notes
 
 If you want, I can now:
 - create a Pull Request from `feature/llm-integration` to `main` and merge it (I need a GitHub token to create the PR via API), or you can create it in the GitHub UI and I will merge it once you confirm.
+
+## Preparar el repositorio para ser público y seguro
+
+Si querés que otras personas clonen el repo y lo ejecuten sin exponer claves, seguí estos pasos:
+
+1. Agregá el secret `WHATSAPP_TOKEN` en GitHub:
+    - GitHub > Repository > Settings > Secrets and variables > Actions > New repository secret
+    - Name: WHATSAPP_TOKEN
+    - Value: (pega el token de System User)
+
+2. El workflow `CI` (archivo `.github/workflows/ci.yml`) correrá en pushes a `main` y ejecutará `scripts/check_token.js` para validar que el token y la configuración están bien.
+
+3. Para contribuyentes: deberán crear su propio `WHATSAPP_TOKEN` en su cuenta de Meta o configurar variables locales en `.env` (usar `.env.example` como plantilla).
+
+## Archivos añadidos
+- `.env.example` - plantilla de variables de entorno
+- `scripts/check_token.js` - script que valida el token de WhatsApp en CI
+- `.github/workflows/ci.yml` - workflow de ejemplo que usa `WHATSAPP_TOKEN` desde Secrets
+
+Con esto, cualquiera que clone el repo podrá seguir las instrucciones del README, crear su propio token, o usar la CI del repo (con tus secrets) para validar la integración.
+
+### Script de validación local
+
+Hay un script `scripts/validate_integration.js` que valida lo siguiente:
+- `WHATSAPP_TOKEN` está presente
+- `WHATSAPP_PHONE_ID` existe en la WABA y retorna su configuración
+- Compara la webhook configurada en la phone con la URL esperada (variable `WHATSAPP_WEBHOOK_URL`)
+
+Ejemplo para ejecutar localmente (PowerShell):
+
+```powershell
+cp .env.example .env
+# editar .env: WHATSAPP_TOKEN, WHATSAPP_PHONE_ID, WHATSAPP_WEBHOOK_URL
+node scripts/validate_integration.js
+```
+
+El script devolverá código 0 si todo está OK, o distinto de 0 en caso de errores (no token, phone id no encontrado, etc.). Es útil para desarrollo y para pasos de despliegue.
