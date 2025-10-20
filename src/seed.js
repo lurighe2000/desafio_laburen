@@ -21,23 +21,23 @@ async function main() {
       stock: parseInt(r.stock || r.Stock || r.stock_qty || 0, 10) || 0,
     }));
   } else {
-    console.log('No products.xlsx found - inserting sample products');
-    products = [
-      { name: 'Camiseta Azul', description: '100% algodón', price: 19.9, stock: 10 },
-      { name: 'Gorra Negra', description: 'Un tamaño', price: 9.5, stock: 20 },
-      { name: 'Taza Logo', description: 'Cerámica 350ml', price: 7.0, stock: 15 },
-    ];
+    console.error('products.xlsx not found in project root. Aborting seed to avoid using embedded sample data.');
+    process.exit(1);
   }
 
-  // Delete dependent records first to avoid foreign key constraint errors
-  await prisma.$transaction([
-    prisma.cartItem.deleteMany(),
-    prisma.cart.deleteMany(),
-    prisma.product.deleteMany(),
-  ]);
-
+  // Upsert products by case-insensitive name to make seed idempotent and
+  // avoid deleting carts/cart_items. This preserves carts created in development
+  // while updating product data from the spreadsheet.
   for (const p of products) {
-    await prisma.product.create({ data: p });
+    const name = (p.name || '').trim();
+    if (!name) continue;
+    // find existing product by name (case-insensitive)
+    const existing = await prisma.product.findFirst({ where: { name: { equals: name, mode: 'insensitive' } } });
+    if (existing) {
+      await prisma.product.update({ where: { id: existing.id }, data: { description: p.description, price: p.price, stock: p.stock } });
+    } else {
+      await prisma.product.create({ data: p });
+    }
   }
 
   console.log('Seed finished. Total products:', products.length);
