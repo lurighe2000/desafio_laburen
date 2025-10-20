@@ -147,22 +147,51 @@ app.get('/carts/:id', async (req, res) => {
   }
 });
 
-// Webhook placeholder for WhatsApp messages (POST)
+// Webhook endpoints for WhatsApp (Meta) - verification and message handling
+app.get('/webhook/messages', (req, res) => {
+  // Verification challenge from Meta
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+  const VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN;
+  if (mode && token) {
+    if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+      console.log('Webhook verified');
+      return res.status(200).send(challenge);
+    }
+    return res.sendStatus(403);
+  }
+  res.status(400).send('no verification query');
+});
+
+const { sendText } = require('./whatsapp/meta');
+
 app.post('/webhook/messages', async (req, res) => {
-  // Demo webhook: detect simple customer intents and act locally
   try {
-    console.log('incoming webhook', req.body);
-    const text = (req.body.text || '').toLowerCase();
-    if (text.includes('comprar') || text.includes('quiero comprar') || text.includes('compraría')) {
-      // create a cart with product 1 x1 (demo)
-      const result = await prisma.$transaction(async (tx) => {
-        const cart = await tx.cart.create({ data: {} });
-        const p = await tx.product.findUnique({ where: { id: 1 } });
-        if (!p) throw new Error('no product 1');
-        await tx.cartItem.create({ data: { cartId: cart.id, productId: p.id, qty: 1, unitPrice: p.price } });
-        return { cart_id: cart.id };
-      });
-      return res.json({ status: 'ok', acted: 'created_cart', result });
+    // Meta sends structured notifications; for demo, handle simplified payloads
+    console.log('incoming webhook body', JSON.stringify(req.body).slice(0, 1000));
+    // Try to find message text and sender
+    const entry = req.body.entry && req.body.entry[0];
+    const changes = entry && entry.changes && entry.changes[0];
+    const value = changes && changes.value;
+    const messages = value && value.messages;
+    if (Array.isArray(messages) && messages.length > 0) {
+      const m = messages[0];
+      const from = m.from;
+      const text = m.text && m.text.body;
+      if (text && text.toLowerCase().includes('comprar')) {
+        // create a cart and reply with cart id
+        const result = await prisma.$transaction(async (tx) => {
+          const cart = await tx.cart.create({ data: {} });
+          const p = await tx.product.findUnique({ where: { id: 1 } });
+          if (!p) throw new Error('no product 1');
+          await tx.cartItem.create({ data: { cartId: cart.id, productId: p.id, qty: 1, unitPrice: p.price } });
+          return { cart_id: cart.id };
+        });
+        // send a reply via Meta
+        await sendText(from, `Gracias! Creé un carrito con id ${result.cart_id}.`);
+        return res.json({ status: 'ok', acted: 'created_cart', result });
+      }
     }
     res.json({ status: 'ok', acted: 'none' });
   } catch (err) {
